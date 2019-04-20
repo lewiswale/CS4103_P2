@@ -12,8 +12,6 @@ import java.text.DateFormat;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
-import java.util.concurrent.TimeUnit;
-import java.util.logging.LogManager;
 import java.util.logging.Logger;
 
 public class ServerNode {
@@ -64,6 +62,7 @@ public class ServerNode {
 
     private void buildNodeList() {
         logger.println(getTimestamp() + "Reading host file.");
+        nodes = new ArrayList<>();
         try {
             FileReader fr = new FileReader(HOST_FILE);
             CSVReader csvReader = new CSVReaderBuilder(fr).withSkipLines(1).build();
@@ -137,6 +136,105 @@ public class ServerNode {
         this.nextNode = nextNode;
     }
 
+    private void checkForElection() {
+        if (nextNode.getId() > coordinatorId) {
+            logger.println(getTimestamp() + "Next node ID greater than coordinator ID");
+            logger.println(getTimestamp() + "TRIGGERING ELECTION");
+            sendElection("");
+        }
+    }
+
+    private void sendElection(String currentIds) {
+        try {
+            logger.println(getTimestamp() + "Connecting to next node.");
+            serverToTalkTo = new Socket(nextNode.getHost(), nextNode.getPort());
+            BufferedReader inFromServer = new BufferedReader(new InputStreamReader(serverToTalkTo.getInputStream()));
+            PrintWriter outToServer = new PrintWriter(new OutputStreamWriter(serverToTalkTo.getOutputStream()), true);
+
+            logger.println(getTimestamp() + "Sending ELECTION.");
+            outToServer.println("ELECTION");
+
+            String msg = inFromServer.readLine();
+            logger.println(getTimestamp() + "Received " + msg);
+
+            if (msg.equals("OK")) {
+                logger.println(getTimestamp() + "Sending ID.");
+                outToServer.println(currentIds + id + ",");
+            }
+
+        } catch (UnknownHostException e) {
+            logger.println(getTimestamp() + "ERROR unknown host.");
+            e.printStackTrace();
+        } catch (ConnectException e) {
+            logger.println(getTimestamp() + "ERROR Server " + nextNode.getId() + " is not communicating.");
+            System.out.println(nextNode.getId() + " is not online.");
+        } catch (IOException e) {
+            logger.println(getTimestamp() + "ERROR IO Exception.");
+            e.printStackTrace();
+        }
+    }
+
+    private int findNewCoordinatorID(String[] ids) {
+        logger.println(getTimestamp() + "Finding server with highest ID.");
+        int highestID = -1;
+
+        for (String id : ids) {
+            int numId = Integer.parseInt(id);
+            if (numId > highestID)
+                highestID = numId;
+        }
+        logger.println(getTimestamp() + "New coordinator shall be " + highestID);
+        return highestID;
+    }
+
+    private void updateCoordinatorID(int startID, int newCoordinator) {
+        try {
+            logger.println(getTimestamp() + "Connecting to next node.");
+            serverToTalkTo = new Socket(nextNode.getHost(), nextNode.getPort());
+            BufferedReader inFromServer = new BufferedReader(new InputStreamReader(serverToTalkTo.getInputStream()));
+            PrintWriter outToServer = new PrintWriter(new OutputStreamWriter(serverToTalkTo.getOutputStream()), true);
+
+            logger.println(getTimestamp() + "Sending UPDATE COORDINATOR ID");
+            outToServer.println("UPDATE COORDINATOR ID");
+            String msg = inFromServer.readLine();
+            if (msg.equals("OK")) {
+                logger.println(getTimestamp() + "Received OK");
+                logger.println(getTimestamp() + "Sending new coordinator ID");
+                outToServer.println(startID + "," + newCoordinator);
+            }
+
+        } catch (UnknownHostException e) {
+            logger.println(getTimestamp() + "ERROR unknown host.");
+            e.printStackTrace();
+        } catch (ConnectException e) {
+            logger.println(getTimestamp() + "ERROR Server " + nextNode.getId() + " is not communicating.");
+            System.out.println(nextNode.getId() + " is not online.");
+        } catch (IOException e) {
+            logger.println(getTimestamp() + "ERROR IO Exception.");
+            e.printStackTrace();
+        }
+    }
+
+    private void updateCoordinatorEndpoint(int newCoordinator) {
+        logger.println(getTimestamp() + "Reading host file.");
+        buildNodeList();
+        logger.println(getTimestamp() + "Finding new coordinator endpoint.");
+        for (Node node : nodes) {
+            if (node.getId() == newCoordinator) {
+                logger.println(getTimestamp() + "Updating coordinator info.");
+                coordinatorId = node.getId();
+                coordinatorHost = node.getHost();
+                coordinatorPort = node.getPort();
+                if (isCoordinator) {
+                    isCoordinator = false;
+                    logger.println(getTimestamp() + "I AM NO LONGER COORDINATOR :(");
+                }
+                logger.println(getTimestamp() + "NEW COORDINATOR IS " + coordinatorId);
+                break;
+            }
+        }
+    }
+
     private void buildRing() {
         logger.println(getTimestamp() + "Beginning ring construction.");
         for (int i = 0; i < nodes.size(); i++) {
@@ -173,6 +271,25 @@ public class ServerNode {
             } catch (ConnectException e) {
                 logger.println(getTimestamp() + "ERROR Server " + currentNode.getId() + " is not communicating.");
                 System.out.println(currentNode.getId() + " is not online.");
+            } catch (IOException e) {
+                logger.println(getTimestamp() + "ERROR IO Exception.");
+                e.printStackTrace();
+            }
+        }
+
+        for (Node node : nodes) {
+            try {
+                serverToTalkTo = new Socket(node.getHost(), node.getPort());
+                PrintWriter outToServer = new PrintWriter(new OutputStreamWriter(serverToTalkTo.getOutputStream()), true);
+                logger.println(getTimestamp() + "Informing Server " + node.getId() + " of ring completion.");
+                outToServer.println("COMPLETE");
+
+            } catch (UnknownHostException e) {
+                logger.println(getTimestamp() + "ERROR unknown host.");
+                e.printStackTrace();
+            } catch (ConnectException e) {
+                logger.println(getTimestamp() + "ERROR Server " + node.getId() + " is not communicating.");
+                System.out.println(node.getId() + " is not online.");
             } catch (IOException e) {
                 logger.println(getTimestamp() + "ERROR IO Exception.");
                 e.printStackTrace();
@@ -227,6 +344,46 @@ public class ServerNode {
 
                 setNextNode(new Node(nextId, nextHost, nextPort));
                 printNextNode();
+                logger.println(getTimestamp() + "Waiting for ring completion...");
+            } else if (msg.equals("COMPLETE")) {
+                logger.println(getTimestamp() + "Completion confirmed.");
+                checkForElection();
+
+            } else if (msg.equals("ELECTION")) {
+                logger.println(getTimestamp() + "Acknowledging client.");
+                outToClient.println("OK");
+
+                msg = inFromClient.readLine();
+                logger.println(getTimestamp() + "Reading server IDs gathered so far.");
+                String[] ids = msg.split(",");
+
+                if (Integer.parseInt(ids[0]) == id) {
+                    logger.println(getTimestamp() + "Ring fully explored.");
+                    logger.println(getTimestamp() + "Starting coordinator update propagation.");
+                    updateCoordinatorID(id, findNewCoordinatorID(ids));
+                } else {
+                    sendElection(msg);
+                }
+            } else if (msg.equals("UPDATE COORDINATOR ID")) {
+                logger.println(getTimestamp() + "Acknowledging client.");
+                outToClient.println("OK");
+                msg = inFromClient.readLine();
+                String[] splitMsg = msg.split(",");
+                int startID = Integer.parseInt(splitMsg[0]);
+
+                if (startID != id) {
+                    int newCoordinatorID = Integer.parseInt(splitMsg[1]);
+                    if (newCoordinatorID != id) {
+                        updateCoordinatorEndpoint(newCoordinatorID);
+                    } else {
+                        coordinatorId = id;
+                        coordinatorHost = host;
+                        coordinatorPort = port;
+                        isCoordinator = true;
+                        logger.println(getTimestamp() + "I AM NOW COORDINATOR");
+                    }
+                    updateCoordinatorID(startID, newCoordinatorID);
+                }
             }
 
             logger.println(getTimestamp() + "Closing connection.");
