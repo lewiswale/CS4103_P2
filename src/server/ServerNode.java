@@ -4,15 +4,12 @@ import com.opencsv.CSVReader;
 import com.opencsv.CSVReaderBuilder;
 
 import java.io.*;
-import java.net.ConnectException;
-import java.net.ServerSocket;
-import java.net.Socket;
-import java.net.UnknownHostException;
+import java.net.*;
 import java.text.DateFormat;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
-import java.util.logging.Logger;
+import java.util.concurrent.TimeUnit;
 
 public class ServerNode {
     private int id;
@@ -29,6 +26,10 @@ public class ServerNode {
     private Node nextNode = null;
     private String loggerFileName;
     private PrintWriter logger;
+    private boolean hasToken = false;
+    private ArrayList<Post> postsToMake = new ArrayList<>();
+    private ArrayList<Post> pullsToMake = new ArrayList<>();
+    private static ArrayList<Post> posts = new ArrayList<>();
 
     public ServerNode(int id, String host, int port, int coordinatorId, String coordinatorHost, int coordinatorPort) throws IOException {
         this.id = id;
@@ -162,6 +163,8 @@ public class ServerNode {
                 outToServer.println(currentIds + id + ",");
             }
 
+            serverToTalkTo.close();
+
         } catch (UnknownHostException e) {
             logger.println(getTimestamp() + "ERROR unknown host.");
             e.printStackTrace();
@@ -203,6 +206,8 @@ public class ServerNode {
                 outToServer.println(startID + "," + newCoordinator);
             }
 
+            serverToTalkTo.close();
+
         } catch (UnknownHostException e) {
             logger.println(getTimestamp() + "ERROR unknown host.");
             e.printStackTrace();
@@ -232,6 +237,60 @@ public class ServerNode {
                 logger.println(getTimestamp() + "NEW COORDINATOR IS " + coordinatorId);
                 break;
             }
+        }
+    }
+
+    private void electionCompleted() {
+        try {
+            serverToTalkTo = new Socket(coordinatorHost, coordinatorPort);
+            BufferedReader inFromServer = new BufferedReader(new InputStreamReader(serverToTalkTo.getInputStream()));
+            PrintWriter outToServer = new PrintWriter(new OutputStreamWriter(serverToTalkTo.getOutputStream()), true);
+
+            logger.println(getTimestamp() + "Informing of election completion to " + coordinatorId + " " + coordinatorPort);
+            outToServer.println("ELECTION COMPLETE");
+            String msg = inFromServer.readLine();
+            logger.println(msg);
+
+            if (msg.equals("OK")) {
+                logger.println(getTimestamp() + "Election completion acknowledged.");
+            }
+
+            serverToTalkTo.close();
+
+        } catch (UnknownHostException e) {
+            logger.println(getTimestamp() + "ERROR unknown host.");
+            e.printStackTrace();
+        } catch (ConnectException e) {
+            logger.println(getTimestamp() + "ERROR Server " + coordinatorId + " is not communicating.");
+            System.out.println(coordinatorId + " is not online.");
+        } catch (IOException e) {
+            logger.println(getTimestamp() + "ERROR IO Exception.");
+            e.printStackTrace();
+        }
+    }
+
+    private void passToken() {
+        try {
+            serverToTalkTo = new Socket(nextNode.getHost(), nextNode.getPort());
+            BufferedReader inFromServer = new BufferedReader(new InputStreamReader(serverToTalkTo.getInputStream()));
+            PrintWriter outToServer = new PrintWriter(new OutputStreamWriter(serverToTalkTo.getOutputStream()), true);
+
+            logger.println(getTimestamp() + "Sending token.");
+            outToServer.println("TOKEN");
+            String msg = inFromServer.readLine();
+            logger.println(getTimestamp() + "Token successfully passed.");
+
+            serverToTalkTo.close();
+
+        } catch (UnknownHostException e) {
+            logger.println(getTimestamp() + "ERROR unknown host.");
+            e.printStackTrace();
+        } catch (ConnectException e) {
+            logger.println(getTimestamp() + "ERROR Server " + nextNode.getId() + " is not communicating.");
+            System.out.println(nextNode.getId() + " is not online.");
+        } catch (IOException e) {
+            logger.println(getTimestamp() + "ERROR IO Exception.");
+            e.printStackTrace();
         }
     }
 
@@ -283,6 +342,7 @@ public class ServerNode {
                 PrintWriter outToServer = new PrintWriter(new OutputStreamWriter(serverToTalkTo.getOutputStream()), true);
                 logger.println(getTimestamp() + "Informing Server " + node.getId() + " of ring completion.");
                 outToServer.println("COMPLETE");
+                serverToTalkTo.close();
 
             } catch (UnknownHostException e) {
                 logger.println(getTimestamp() + "ERROR unknown host.");
@@ -303,7 +363,31 @@ public class ServerNode {
         System.out.println("Next node Port: " + nextNode.getPort());
     }
 
-    private void listenForConnections() throws IOException {
+    private void addPostToQueue(String sender, String recipient, String post) {
+        postsToMake.add(new Post(sender, recipient, post));
+    }
+
+    private void postMessage() {
+        posts.add(postsToMake.get(0));
+        postsToMake.remove(0);
+    }
+
+    private Post getPost(String recipient) {
+        Post toReturn = null;
+
+        for (Post post : posts) {
+            if (post.getRecipient().equals(recipient)) {
+                toReturn = post;
+                break;
+            }
+        }
+
+        posts.remove(toReturn);
+
+        return toReturn;
+    }
+
+    private void listenForConnections() throws IOException, InterruptedException {
         while (true) {
             logger.println(getTimestamp() + "Listening for connection...");
             System.out.println("Listening...");
@@ -329,6 +413,8 @@ public class ServerNode {
                 String msgToSend = "Hello Coordinator! From " + id;
                 logger.println(getTimestamp() + "Sending " + msgToSend);
                 outToClient.println(msgToSend);
+                logger.println(getTimestamp() + "Closing connection.");
+                connected.close();
 
             } else if (msg.equals("NEXT NODE")) {
                 logger.println(getTimestamp() + "Acknowledging client.");
@@ -345,22 +431,36 @@ public class ServerNode {
                 setNextNode(new Node(nextId, nextHost, nextPort));
                 printNextNode();
                 logger.println(getTimestamp() + "Waiting for ring completion...");
+                logger.println(getTimestamp() + "Closing connection.");
+                connected.close();
             } else if (msg.equals("COMPLETE")) {
                 logger.println(getTimestamp() + "Completion confirmed.");
+                TimeUnit.SECONDS.sleep(1);
                 checkForElection();
+                logger.println(getTimestamp() + "Closing connection.");
+                connected.close();
 
             } else if (msg.equals("ELECTION")) {
                 logger.println(getTimestamp() + "Acknowledging client.");
                 outToClient.println("OK");
 
                 msg = inFromClient.readLine();
+                logger.println(getTimestamp() + "Closing connection.");
+                connected.close();
+
                 logger.println(getTimestamp() + "Reading server IDs gathered so far.");
                 String[] ids = msg.split(",");
 
                 if (Integer.parseInt(ids[0]) == id) {
                     logger.println(getTimestamp() + "Ring fully explored.");
-                    logger.println(getTimestamp() + "Starting coordinator update propagation.");
-                    updateCoordinatorID(id, findNewCoordinatorID(ids));
+                    int newCoordinatorID = findNewCoordinatorID(ids);
+                    if (coordinatorId != newCoordinatorID) {
+                        logger.println(getTimestamp() + "Starting coordinator update propagation.");
+                        updateCoordinatorID(id, newCoordinatorID);
+                    } else {
+                        logger.println(getTimestamp() + "Coordinator already been updated.");
+                        logger.println(getTimestamp() + "No need for update cycle.");
+                    }
                 } else {
                     sendElection(msg);
                 }
@@ -368,11 +468,13 @@ public class ServerNode {
                 logger.println(getTimestamp() + "Acknowledging client.");
                 outToClient.println("OK");
                 msg = inFromClient.readLine();
+
                 String[] splitMsg = msg.split(",");
                 int startID = Integer.parseInt(splitMsg[0]);
 
-                if (startID != id) {
-                    int newCoordinatorID = Integer.parseInt(splitMsg[1]);
+                int newCoordinatorID = Integer.parseInt(splitMsg[1]);
+
+                if (coordinatorId != newCoordinatorID) {
                     if (newCoordinatorID != id) {
                         updateCoordinatorEndpoint(newCoordinatorID);
                     } else {
@@ -382,12 +484,63 @@ public class ServerNode {
                         isCoordinator = true;
                         logger.println(getTimestamp() + "I AM NOW COORDINATOR");
                     }
-                    updateCoordinatorID(startID, newCoordinatorID);
+                } else {
+                    logger.println(getTimestamp() + "New coordinator already set.");
+                    logger.println(getTimestamp() + "Redundant election cancelled.");
+                    continue;
                 }
-            }
 
-            logger.println(getTimestamp() + "Closing connection.");
-            connected.close();
+                if (startID != id) {
+                    updateCoordinatorID(startID, newCoordinatorID);
+                } else {
+                    electionCompleted();
+                }
+
+                logger.println(getTimestamp() + "Closing connection.");
+                connected.close();
+
+            } else if (msg.equals("ELECTION COMPLETE")) {
+                logger.println(getTimestamp() + "Election has been completed.");
+                logger.println(getTimestamp() + "Acknowledging client.");
+                outToClient.println("OK");
+                logger.println(getTimestamp() + "Closing connection.");
+                connected.close();
+                passToken();
+            } else if (msg.equals("TOKEN")) {
+                System.out.println("token received");
+                logger.println(getTimestamp() + "RECEIVED TOKEN");
+                logger.println(getTimestamp() + "Acknowledging client.");
+                outToClient.println("OK");
+                logger.println(getTimestamp() + "Closing connection.");
+                connected.close();
+
+                passToken();
+            } else if (msg.equals("POST")) {
+                logger.println(getTimestamp() + "Acknowledging client.");
+                outToClient.println("OK");
+                String sender = inFromClient.readLine();
+                String recipient = inFromClient.readLine();
+                String post = inFromClient.readLine();
+                logger.println(getTimestamp() + "Closing connection.");
+                connected.close();
+                addPostToQueue(sender, recipient, post);
+
+            } else if (msg.equals("PULL")) {
+                logger.println(getTimestamp() + "Acknowledging client.");
+                outToClient.println("OK");
+                String recipient = inFromClient.readLine();
+                Post post = getPost(recipient);
+
+                if (post != null) {
+                    outToClient.println("INCOMING");
+                    outToClient.println(post.getPost());
+                    outToClient.println(post.getSender());
+                } else
+                    outToClient.println("NO MESSAGES");
+
+                logger.println(getTimestamp() + "Closing connection.");
+                connected.close();
+            }
         }
     }
 
@@ -412,7 +565,7 @@ public class ServerNode {
         new Thread(() -> {
             try {
                 finalSs.listenForConnections();
-            } catch (IOException e) {
+            } catch (IOException | InterruptedException e) {
                 e.printStackTrace();
             }
         }).start();
