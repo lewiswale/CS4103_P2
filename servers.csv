@@ -1,4 +1,7 @@
 id,host,port
 1,localhost,6789
-2,localhost,6790
-3,localhost,6791
+6,localhost,6790
+4,localhost,6791
+2,localhost,6792
+7,localhost,6793
+5,localhost,6794
